@@ -1,0 +1,4 @@
+-r ocr.txt
+sympy
+scipy
+numpy

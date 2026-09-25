@@ -1,0 +1,17 @@
+chatbot features:
+	
+	-roleplays
+	-reasoning
+	-conversations
+	*sending attachments
+	-pasting screenshots
+	-search internet (shallow search)
+
+chatbot stack:
+
+	-main chatbot (jaahas/qwen3.5-uncensored:2b)
+	-router for when to use thinking mode (jaahas/qwen3.5-uncensored:2b)
+	-image analysis model (qwen3-vl:2b)
+
+
+	

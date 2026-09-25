@@ -1,0 +1,5 @@
+-r vision.txt
+# Install the appropriate PaddlePaddle backend separately; see README.
+# These scripts use the PaddleOCR 3.x predict API.
+paddleocr>=3,<4
+pix2text

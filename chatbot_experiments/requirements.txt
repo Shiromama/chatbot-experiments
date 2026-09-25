@@ -1,0 +1,2 @@
+# Minimal text-chat dependency. No tested dependency lock was supplied.
+ollama

@@ -1,0 +1,321 @@
+import os
+
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+
+import ollama
+import time
+import re
+from datetime import datetime
+
+try:
+    from PIL import ImageGrab
+except ImportError:
+    ImageGrab = None
+
+try:
+    from paddleocr import PaddleOCR
+except ImportError:
+    PaddleOCR = None
+
+try:
+    from pix2text import Pix2Text
+except ImportError:
+    Pix2Text = None
+
+
+MAIN_MODEL = "jaahas/qwen3.5-uncensored:2b"
+
+SYSTEM_PROMPT = "You are a helpful AI assistant. Answer clearly, directly, and naturally."
+
+DEBUG_MODE = True
+TEMP_IMAGE_DIR = "temp_images"
+
+ocr_engine = None
+math_ocr_engine = None
+
+
+def debug_print(msg: str) -> None:
+    if DEBUG_MODE:
+        print(msg)
+
+
+def ensure_temp_dir() -> None:
+    os.makedirs(TEMP_IMAGE_DIR, exist_ok=True)
+
+
+def extract_paste_instruction(prompt: str) -> str:
+    return prompt[len("/paste"):].strip()
+
+
+def grab_clipboard_image():
+    if ImageGrab is None:
+        return None
+
+    try:
+        return ImageGrab.grabclipboard()
+    except Exception:
+        return None
+
+
+def save_clipboard_image(img) -> str:
+    ensure_temp_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    img_path = os.path.join(TEMP_IMAGE_DIR, f"clipboard_{timestamp}.png")
+    img.save(img_path)
+    return img_path
+
+
+def get_ocr_engine():
+    global ocr_engine
+
+    if ocr_engine is None:
+        if PaddleOCR is None:
+            raise ImportError("PaddleOCR is not installed.")
+
+        debug_print("[OCR] Loading PaddleOCR engine...")
+        ocr_engine = PaddleOCR(lang="en")
+        debug_print("[OCR] PaddleOCR ready")
+
+    return ocr_engine
+
+
+def get_math_ocr_engine():
+    global math_ocr_engine
+
+    if math_ocr_engine is None:
+        if Pix2Text is None:
+            raise ImportError("Pix2Text is not installed.")
+
+        debug_print("[MATH OCR] Loading Pix2Text engine...")
+        math_ocr_engine = Pix2Text()
+        debug_print("[MATH OCR] Pix2Text ready")
+
+    return math_ocr_engine
+
+
+def run_real_ocr(image_path: str) -> str:
+    debug_print("\n[IMAGE] Clipboard image captured")
+    debug_print(f"[SAVE] Temp image saved: {image_path}")
+    debug_print("[OCR] Running real whole-image PaddleOCR...")
+
+    ocr = get_ocr_engine()
+    result = ocr.predict(image_path)
+
+    lines = []
+    total_lines = 0
+
+    if not result:
+        debug_print("[OCR] No OCR results returned")
+        return ""
+
+    for page in result:
+        rec_texts = page.get("rec_texts", [])
+        rec_scores = page.get("rec_scores", [])
+
+        for i, text in enumerate(rec_texts):
+            text = str(text).strip()
+            if not text:
+                continue
+
+            conf = None
+            if i < len(rec_scores):
+                try:
+                    conf = float(rec_scores[i])
+                except Exception:
+                    conf = None
+
+            total_lines += 1
+            if conf is not None:
+                debug_print(f"[OCR LINE {total_lines}] ({conf:.2f}) {text}")
+            else:
+                debug_print(f"[OCR LINE {total_lines}] {text}")
+
+            lines.append(text)
+
+    debug_print(f"\n[OCR] Total extracted lines: {total_lines}")
+    debug_print("[MERGE] Combining OCR lines...")
+    debug_print("[DONE] Structured text ready\n")
+
+    return "\n".join(lines)
+
+
+def run_math_ocr(image_path: str) -> str:
+    debug_print("\n[IMAGE] Clipboard image captured")
+    debug_print(f"[SAVE] Temp image saved: {image_path}")
+    debug_print("[MATH OCR] Running Pix2Text on image...")
+
+    model = get_math_ocr_engine()
+
+    try:
+        result = model.recognize(image_path)
+    except Exception:
+        result = model(image_path)
+
+    if isinstance(result, dict):
+        latex = result.get("text") or result.get("latex") or str(result)
+    else:
+        latex = str(result)
+
+    latex = latex.strip()
+
+    debug_print(f"[MATH OCR RESULT] {latex if latex else '[empty]'}")
+    debug_print("[DONE] LaTeX/text math result ready\n")
+
+    return latex
+
+
+def detect_image_mode(instruction: str, text_ocr_preview: str) -> str:
+    combined = f"{instruction}\n{text_ocr_preview}".lower()
+
+    math_keywords = [
+        "solve", "equation", "integral", "differentiate", "derivative",
+        "limit", "matrix", "determinant", "simplify", "factor", "math",
+        "algebra", "calculus", "trigonometry", "latex"
+    ]
+
+    math_symbols_pattern = r"[=+\-*/^√∫∑π∞≤≥≠]"
+
+    keyword_hit = any(word in combined for word in math_keywords)
+    symbol_hits = len(re.findall(math_symbols_pattern, combined))
+    digit_count = sum(ch.isdigit() for ch in combined)
+
+    if keyword_hit or symbol_hits >= 3 or (digit_count >= 4 and symbol_hits >= 2):
+        return "math"
+
+    return "text"
+
+
+def build_image_prompt(instruction: str, structured_text: str, image_path: str, mode: str) -> str:
+    extracted = structured_text.strip() if structured_text.strip() else "[No text extracted from screenshot]"
+
+    if mode == "math":
+        return (
+            f"The user sent a screenshot through the clipboard.\n"
+            f"Image path: {image_path}\n"
+            f"Detected content type: math\n\n"
+            f"User instruction:\n{instruction if instruction else '[No instruction provided]'}\n\n"
+            f"Recognized math content:\n{extracted}\n\n"
+            f"Treat the recognized math content as OCR output that may contain small errors. "
+            f"Help the user solve or analyze it carefully, and point out ambiguity if needed."
+        )
+
+    return (
+        f"The user sent a screenshot through the clipboard.\n"
+        f"Image path: {image_path}\n"
+        f"Detected content type: text\n\n"
+        f"User instruction:\n{instruction if instruction else '[No instruction provided]'}\n\n"
+        f"Extracted text from screenshot:\n{extracted}\n\n"
+        f"Please help the user based on the instruction and extracted text. "
+        f"If the screenshot seems incomplete or OCR may be inaccurate, say so clearly."
+    )
+
+
+history = [
+    {
+        "role": "system",
+        "content": SYSTEM_PROMPT
+    }
+]
+
+
+while True:
+    prompt = input("You: ").strip()
+
+    if prompt.lower() in ["exit", "quit"]:
+        print("Goodbye!")
+        break
+
+    if prompt.lower() == "/debug on":
+        DEBUG_MODE = True
+        print("[Debug mode enabled]\n")
+        continue
+
+    if prompt.lower() == "/debug off":
+        DEBUG_MODE = False
+        print("[Debug mode disabled]\n")
+        continue
+
+    final_user_prompt = prompt
+
+    if prompt.startswith("/paste"):
+        instruction = extract_paste_instruction(prompt)
+
+        if ImageGrab is None:
+            print("\n[Error] Pillow is not installed. Run: pip install pillow\n")
+            continue
+
+        if PaddleOCR is None:
+            print("\n[Error] PaddleOCR is not installed. Run: pip install paddleocr\n")
+            continue
+
+        img = grab_clipboard_image()
+        if img is None:
+            print("\n[Error] No image found in clipboard.\n")
+            continue
+
+        try:
+            img_path = save_clipboard_image(img)
+        except Exception as e:
+            print(f"\n[Error] Failed to save clipboard image: {e}\n")
+            continue
+
+        try:
+            preview_text = run_real_ocr(img_path)
+        except Exception as e:
+            print(f"\n[Error] OCR preview failed: {e}\n")
+            continue
+
+        detected_mode = detect_image_mode(instruction, preview_text)
+        debug_print(f"[IMAGE MODE] {detected_mode.upper()}")
+
+        try:
+            if detected_mode == "math":
+                if Pix2Text is None:
+                    print("\n[Error] Pix2Text is not installed. Run: pip install pix2text\n")
+                    continue
+                structured_text = run_math_ocr(img_path)
+            else:
+                structured_text = preview_text
+        except Exception as e:
+            print(f"\n[Error] OCR failed: {e}\n")
+            continue
+
+        final_user_prompt = build_image_prompt(
+            instruction=instruction,
+            structured_text=structured_text,
+            image_path=img_path,
+            mode=detected_mode
+        )
+        debug_print("[FINAL PROMPT] Built prompt from screenshot pipeline")
+
+    history.append({"role": "user", "content": final_user_prompt})
+
+    start_time = time.perf_counter()
+
+    stream = ollama.chat(
+        model=MAIN_MODEL,
+        messages=history,
+        stream=True
+    )
+
+    full_answer = ""
+    answer_started = False
+
+    for chunk in stream:
+        msg = chunk["message"]
+        content_part = msg.get("content", "")
+
+        if content_part:
+            if not answer_started:
+                answer_started = True
+                print("\nAssistant:")
+            print(content_part, end="", flush=True)
+            full_answer += content_part
+
+    end_time = time.perf_counter()
+    elapsed = end_time - start_time
+
+    print(f"\n\n[Done in {elapsed:.2f} seconds]\n")
+
+    history.append({"role": "assistant", "content": full_answer})
