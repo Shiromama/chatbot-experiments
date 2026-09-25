@@ -63,13 +63,3 @@ Model names, persona prompts and debug defaults are configured near the top of e
 ## Current limitations
 
 All scripts start their input loop at import time, so run them directly rather than importing them. Live model, clipboard, OCR, network and solver behavior has not been validated in this cleanup. Math variants accept expressions through SymPy parsing functions; use trusted local input only, including OCR/model-derived expressions. These parsers are not a sandbox ([SymPy guidance](https://docs.sympy.org/latest/modules/core.html)). See [the cleanup and analysis report](CLEANUP_REPORT.md) for code references and follow-up work.
-
-## Check the source
-
-```powershell
-python tools/check_syntax.py
-```
-
-This compiles source in memory without importing scripts, contacting models, installing packages or writing bytecode. It checks syntax only.
-
-
